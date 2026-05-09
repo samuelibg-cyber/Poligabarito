@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+  <meta name="theme-color" content="#0f172a"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <title>GabaritoScan</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f172a; color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    input, select, button { font-family: inherit; }
+    ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #1e293b; } ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    // ── Paleta ──────────────────────────────────────────────────────────────
+    const C = {
+      bg:"#0f172a",card:"#1e293b",border:"#334155",
+      accent:"#6366f1",accentLight:"#818cf8",
+      success:"#22c55e",error:"#ef4444",warn:"#f59e0b",
+      text:"#f1f5f9",muted:"#94a3b8",subtle:"#475569",
+    };
+    const alts = ["A","B","C","D","E"];
+    const uid = () => Math.random().toString(36).slice(2,9);
+    const calcNota = (ac,total,peso) => total===0?0:((ac/total)*(peso??10)).toFixed(2);
+
+    // ── Storage ──────────────────────────────────────────────────────────────
+    function useStore() {
+      const load = (k,d) => { try{ return JSON.parse(localStorage.getItem(k)||"null")||d; }catch{return d;} };
+      const [provas,setProvas] = useState(()=>load("gscan_provas",[]));
+      const [resultados,setResultados] = useState(()=>load("gscan_resultados",[]));
+      const [turmas,setTurmas] = useState(()=>load("gscan_turmas",[]));
+      const persist = (k,v) => localStorage.setItem(k,JSON.stringify(v));
+      const saveProva = p => setProvas(prev=>{ const n=prev.find(x=>x.id===p.id)?prev.map(x=>x.id===p.id?p:x):[...prev,p]; persist("gscan_provas",n); return n; });
+      const delProva = id => { setProvas(prev=>{const n=prev.filter(x=>x.id!==id);persist("gscan_provas",n);return n;}); setResultados(prev=>{const n=prev.filter(x=>x.provaId!==id);persist("gscan_resultados",n);return n;}); };
+      const saveResultado = r => setResultados(prev=>{const n=[...prev,r];persist("gscan_resultados",n);return n;});
+      const delResultado = id => setResultados(prev=>{const n=prev.filter(x=>x.id!==id);persist("gscan_resultados",n);return n;});
+      const saveTurmas = t => { setTurmas(t); persist("gscan_turmas",t); };
+      return {provas,resultados,turmas,saveProva,delProva,saveResultado,delResultado,saveTurmas};
+    }
+
+    // ── CSV Parser ────────────────────────────────────────────────────────────
+    function normalizeStr(s) {
+      return s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/['"]/g,"");
+    }
+    function parseCSV(text) {
+      const lines = text.trim().split(/\r?\n/).filter(Boolean);
+      if (lines.length < 2) return [];
+      const firstLine = lines[0];
+      const sep = firstLine.includes(";") ? ";" : firstLine.includes("\t") ? "\t" : ",";
+      const headers = firstLine.split(sep).map(normalizeStr);
+      const matchCol = tests => headers.findIndex(h => tests.some(t => h.includes(t)));
+      const colNome = matchCol(["nome","aluno","estudante","discente","student","name"]);
+      const colTurma = matchCol(["turma","classe","serie","ano","class","grade","grupo"]);
+      const colMatricula = matchCol(["matricula","mat","id","codigo","registro"]);
+      const nomeIdx = colNome >= 0 ? colNome : 0;
+      return lines.slice(1).map(l => {
+        const cols = l.split(sep).map(c=>c.trim().replace(/['"]/g,""));
+        if (!cols[nomeIdx]) return null;
+        return { nome:cols[nomeIdx]||"", turma:colTurma>=0?(cols[colTurma]||""):"", matricula:colMatricula>=0?(cols[colMatricula]||""):"" };
+      }).filter(Boolean).filter(a=>a.nome);
+    }
+
+    // ── Componentes base ──────────────────────────────────────────────────────
+    const Btn = ({children,onClick,color=C.accent,sm,full,disabled,outline}) => (
+      <button onClick={onClick} disabled={disabled} style={{background:outline?"transparent":disabled?C.subtle:color,border:`1.5px solid ${outline?C.border:"transparent"}`,color:disabled?C.muted:C.text,padding:sm?"6px 14px":"10px 20px",borderRadius:8,cursor:disabled?"not-allowed":"pointer",fontSize:sm?13:14,fontWeight:600,width:full?"100%":"auto",transition:"opacity .15s"}}>{children}</button>
+    );
+    const Card = ({children,style}) => (<div style={{background:C.card,border:`1px solid ${C.border}`,borderRadius:12,padding:20,...style}}>{children}</div>);
+    const Inp = ({label,...props}) => (<div style={{marginBottom:14}}>{label&&<label style={{color:C.muted,fontSize:13,display:"block",marginBottom:4}}>{label}</label>}<input {...props} style={{width:"100%",background:C.bg,border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"9px 12px",fontSize:14,boxSizing:"border-box",outline:"none"}}/></div>);
+    const Badge = ({children,color}) => (<span style={{background:color+"22",color,borderRadius:20,padding:"2px 10px",fontSize:12,fontWeight:600}}>{children}</span>);
+    const Modal = ({title,children,onClose,wide}) => (
+      <div style={{position:"fixed",inset:0,background:"#000a",zIndex:100,display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={e=>e.target===e.currentTarget&&onClose()}>
+        <div style={{background:C.card,borderRadius:16,border:`1px solid ${C.border}`,width:"100%",maxWidth:wide?680:460,maxHeight:"92vh",overflowY:"auto",padding:22}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+            <span style={{fontWeight:700,fontSize:17}}>{title}</span>
+            <button onClick={onClose} style={{background:"none",border:"none",color:C.muted,fontSize:24,cursor:"pointer",lineHeight:1}}>×</button>
+          </div>
+          {children}
+        </div>
+      </div>
+    );
+
+    // ── Importar Turmas ────────────────────────────────────────────────────────
+    function ImportarTurmas({atual,onSave,onClose}) {
+      const [alunos,setAlunos] = useState(atual||[]);
+      const [err,setErr] = useState("");
+      const [nomeM,setNomeM] = useState(""); const [turmaM,setTurmaM] = useState("");
+
+      const handleFile = async e => {
+        const f = e.target.files[0]; if(!f) return; setErr("");
+        const text = await f.text();
+        const parsed = parseCSV(text);
+        if(!parsed||parsed.length===0) return setErr("Nenhum aluno encontrado. Verifique se o arquivo tem cabeçalho (nome, turma) e dados.");
+        setAlunos(parsed);
+      };
+
+      const addM = () => { if(!nomeM.trim()) return; setAlunos(p=>[...p,{nome:nomeM.trim(),turma:turmaM.trim(),matricula:""}]); setNomeM(""); setTurmaM(""); };
+      const rem = i => setAlunos(p=>p.filter((_,idx)=>idx!==i));
+      const turmasU = [...new Set(alunos.map(a=>a.turma).filter(Boolean))];
+
+      return (
+        <Modal title="Gerenciar Turmas e Alunos" onClose={onClose} wide>
+          <p style={{color:C.muted,fontSize:13,marginBottom:12}}>
+            Importe um <b style={{color:C.text}}>.csv</b> ou <b style={{color:C.text}}>.txt</b> com colunas <code style={{background:C.bg,padding:"1px 6px",borderRadius:4}}>nome</code> e <code style={{background:C.bg,padding:"1px 6px",borderRadius:4}}>turma</code>. Separador: vírgula, ponto e vírgula ou tab. Cabeçalhos com acento são aceitos.
+          </p>
+          <label style={{display:"inline-flex",alignItems:"center",gap:8,background:C.accent,color:C.text,padding:"9px 18px",borderRadius:8,cursor:"pointer",fontWeight:600,fontSize:14,marginBottom:8}}>
+            📂 Importar CSV/TXT
+            <input type="file" accept=".csv,.txt,.xls,.xlsx" style={{display:"none"}} onChange={handleFile}/>
+          </label>
+          {err && <div style={{color:C.error,fontSize:13,marginBottom:8}}>{err}</div>}
+
+          <div style={{borderTop:`1px solid ${C.border}`,paddingTop:14,marginBottom:14}}>
+            <div style={{fontSize:13,color:C.muted,marginBottom:8}}>Adicionar manualmente</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <input value={nomeM} onChange={e=>setNomeM(e.target.value)} placeholder="Nome do aluno" onKeyDown={e=>e.key==="Enter"&&addM()} style={{flex:2,minWidth:130,background:C.bg,border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"8px 10px",fontSize:13,outline:"none"}}/>
+              <input value={turmaM} onChange={e=>setTurmaM(e.target.value)} placeholder="Turma" style={{flex:1,minWidth:70,background:C.bg,border:`1px solid ${C.border}`,color:C.text,borderRadius:8,padding:"8px 10px",fontSize:13,outline:"none"}}/>
+              <Btn sm onClick={addM}>+ Adicionar</Btn>
+            </div>
+          </div>
+
+          {alunos.length > 0 && <>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <span style={{fontSize:13,color:C.muted}}>{alunos.length} aluno(s) · {turmasU.length} turma(s)</span>
+              <Btn sm outline color={C.error} onClick={()=>{if(confirm("Limpar todos?"))setAlunos([])}}>Limpar</Btn>
+            </div>
+            <div style={{maxHeight:240,overflowY:"auto",border:`1px solid ${C.border}`,borderRadius:8,marginBottom:16}}>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                <thead><tr style={{background:C.bg}}>
+                  {["#","Nome","Turma",""].map(h=><th key={h} style={{padding:"7px 10px",textAlign:"left",color:C.muted,fontWeight:600,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}
+                </tr></thead>
+                <tbody>{alunos.map((a,i)=>(
+                  <tr key={i} style={{borderBottom:`1px solid ${C.border}22`}}>
+                    <td style={{padding:"6px 10px",color:C.subtle}}>{i+1}</td>
+                    <td style={{padding:"6px 10px"}}>{a.nome}</td>
+                    <td style={{padding:"6px 10px"}}><Badge color={C.accent}>{a.turma||"—"}</Badge></td>
+                    <td style={{padding:"6px 10px"}}><button onClick={()=>rem(i)} style={{background:"none",border:"none",color:C.error,cursor:"pointer",fontSize:16}}>×</button></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          </>}
+
+          <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+            <Btn outline onClick={onClose}>Cancelar</Btn>
+            <Btn onClick={()=>onSave(alunos)} disabled={alunos.length===0}>💾 Salvar Alunos</Btn>
+          </div>
+        </Modal>
+      );
+    }
+
+    // ── Gerar Folhas ──────────────────────────────────────────────────────────
+    function GerarFolhas({prova,alunos,onClose}) {
+      const [filtro,setFiltro] = useState("todas");
+      const turmasU = ["todas",...[...new Set(alunos.map(a=>a.turma).filter(Boolean))]];
+      const lista = filtro==="todas" ? alunos : alunos.filter(a=>a.turma===filtro);
+
+      const imprimir = () => {
+        const nq = prova.gabarito.length;
+        const cols = nq<=20?1:nq<=40?2:3;
+        const porCol = Math.ceil(nq/cols);
+        const estilos = `
+          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+          *{box-sizing:border-box;margin:0;padding:0}
+          body{font-family:'Inter',Arial,sans-serif;background:#fff;color:#000}
+          .folha{width:210mm;min-height:297mm;padding:14mm 16mm;page-break-after:always;display:flex;flex-direction:column}
+          .cabecalho{border:2px solid #111;border-radius:8px;padding:14px;margin-bottom:14px}
+          .titulo-app{font-size:10px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
+          .titulo-prova{font-size:17px;font-weight:700;margin-bottom:12px}
+          .campos{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+          .campo{border-bottom:1.5px solid #000;padding-bottom:4px}
+          .campo label{font-size:9px;color:#777;display:block;margin-bottom:16px;text-transform:uppercase;letter-spacing:.5px}
+          .campo .valor{font-size:13px;font-weight:600}
+          .assinatura{margin-top:8px;border-bottom:1.5px solid #000}
+          .assinatura label{font-size:9px;color:#777;display:block;margin-bottom:20px;text-transform:uppercase}
+          .instrucoes{font-size:10px;color:#555;margin:12px 0;border:1px solid #ccc;border-radius:4px;padding:7px 10px;line-height:1.5}
+          .grid{display:grid;grid-template-columns:repeat(${cols},1fr);gap:0 20px;flex:1}
+          .col{display:flex;flex-direction:column;gap:6px}
+          .q{display:flex;align-items:center;gap:8px}
+          .num{width:24px;text-align:right;font-weight:700;font-size:12px;color:#333}
+          .bolhas{display:flex;gap:5px}
+          .bolha{width:22px;height:22px;border-radius:50%;border:1.5px solid #000;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#444}
+          .canto{position:absolute;width:14px;height:14px;border-color:#000;border-style:solid}
+          .tl{top:8mm;left:8mm;border-width:2px 0 0 2px}
+          .tr{top:8mm;right:8mm;border-width:2px 2px 0 0}
+          .bl{bottom:8mm;left:8mm;border-width:0 0 2px 2px}
+          .br{bottom:8mm;right:8mm;border-width:0 2px 2px 0}
+          @media print{@page{size:A4;margin:0} body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+        `;
+        const folhas = lista.map(al => {
+          const colunas = Array.from({length:cols},(_,ci)=>{
+            const inicio = ci*porCol;
+            const qs = Array.from({length:Math.min(porCol,nq-inicio)},(_,qi)=>{
+              const num = inicio+qi+1;
+              return `<div class="q"><span class="num">${num}.</span><div class="bolhas">${alts.map(a=>`<div class="bolha">${a}</div>`).join("")}</div></div>`;
+            }).join("");
+            return `<div class="col">${qs}</div>`;
+          }).join("");
+          return `
+            <div class="folha" style="position:relative">
+              <div class="canto tl"></div><div class="canto tr"></div>
+              <div class="canto bl"></div><div class="canto br"></div>
+              <div class="cabecalho">
+                <div class="titulo-app">📋 GabaritoScan</div>
+                <div class="titulo-prova">${prova.nome}</div>
+                <div class="campos">
+                  <div class="campo"><label>Nome do Aluno</label><div class="valor">${al.nome}</div></div>
+                  <div class="campo"><label>Turma / Disciplina</label><div class="valor">${al.turma||""}${al.turma&&prova.disciplina?" · ":""}${prova.disciplina||""}</div></div>
+                  <div class="campo"><label>Data</label><div class="valor">&nbsp;</div></div>
+                  <div class="campo"><label>Questões / Nota máxima</label><div class="valor">${nq} questões · ${prova.peso} pts</div></div>
+                </div>
+                <div class="assinatura"><label>Assinatura do Aluno</label></div>
+              </div>
+              <div class="instrucoes">⚫ Preencha completamente a bolha da alternativa escolhida com caneta preta ou azul. Não rasure nem faça marcas fora das bolhas. Marque apenas <strong>uma</strong> alternativa por questão.</div>
+              <div class="grid">${colunas}</div>
+            </div>`;
+        }).join("");
+        const win = window.open("","_blank");
+        win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Gabaritos — ${prova.nome}</title><style>${estilos}</style></head><body>${folhas}<script>window.onload=()=>{window.print()}<\/script></body></html>`);
+        win.document.close();
+      };
+
+      return (
+        <Modal title={`Gerar Folhas — ${prova.nome}`} onClose={onClose} wide>
+          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:16,flexWrap:"wrap"}}>
+            <span style={{color:C.muted,fontSize:13}}>Filtrar:</span>
+            {turmasU.map(t=>(
+              <button key={t} onClick={()=>setFiltro(t)} style={{background:filtro===t?C.accent:C.bg,border:`1px solid ${filtro===t?C.accent:C.border}`,color:C.text,borderRadius:20,padding:"4px 14px",cursor:"pointer",fontSize:13,fontWeight:filtro===t?700:400}}>{t==="todas"?"Todas":t}</button>
+            ))}
+          </div>
+          <div style={{border:`1px solid ${C.border}`,borderRadius:8,maxHeight:280,overflowY:"auto",marginBottom:14}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead><tr style={{background:C.bg}}>{["#","Nome","Turma"].map(h=><th key={h} style={{padding:"8px 12px",textAlign:"left",color:C.muted,fontWeight:600,borderBottom:`1px solid ${C.border}`}}>{h}</th>)}</tr></thead>
+              <tbody>{lista.map((a,i)=>(
+                <tr key={i} style={{borderBottom:`1px solid ${C.border}22`}}>
+                  <td style={{padding:"7px 12px",color:C.subtle}}>{i+1}</td>
+                  <td style={{padding:"7px 12px"}}>{a.nome}</td>
+                  <td style={{padding:"7px 12px"}}><Badge color={C.accent}>{a.turma||"—"}</Badge></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+          <Card style={{marginBottom:14,padding:12}}>
+            <div style={{fontSize:13,color:C.muted,marginBottom:6}}>Resumo</div>
+            <div style={{display:"flex",gap:20,flexWrap:"wrap",fontSize:14}}>
+              <span>📄 <b style={{color:C.text}}>{lista.length}</b> folhas</span>
+              <span>❓ <b style={{color:C.text}}>{prova.gabarito.length}</b> questões</span>
+              <span>📐 Formato <b style={{color:C.text}}>A4</b></span>
+            </div>
+          </Card>
+          <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+            <Btn outline onClick={onClose}>Fechar</Btn>
+            <Btn onClick={imprimir} disabled={lista.length===0}>🖨️ Imprimir {lista.length} Folha{lista.length!==1?"s":""}</Btn>
+          </div>
+        </Modal>
+      );
+    }
+
+    // ── Cadastro Prova ─────────────────────────────────────────────────────────
+    function CadastroProva({prova,onSave,onClose}) {
+      const [nome,setNome]=useState(prova?.nome||""); const [disc,setDisc]=useState(prova?.disciplina||"");
+      const [turma,setTurma]=useState(prova?.turma||""); const [peso,setPeso]=useState(prova?.peso||10);
+      const [nq,setNq]=useState(prova?.gabarito?.length||10);
+      const [gab,setGab]=useState(prova?.gabarito||Array(10).fill(""));
+      const changeNq=v=>{const n=Math.max(1,Math.min(60,Number(v)));setNq(n);setGab(p=>{const g=[...p];while(g.length<n)g.push("");return g.slice(0,n);});};
+      const save=()=>{if(!nome.trim())return alert("Informe o nome da prova.");if(gab.some(g=>!g))return alert("Preencha todas as alternativas.");onSave({id:prova?.id||uid(),nome,disciplina:disc,turma,gabarito:gab,peso:Number(peso),criadoEm:prova?.criadoEm||new Date().toISOString()});};
+      return (
+        <Modal title={prova?"Editar Prova":"Nova Prova"} onClose={onClose}>
+          <Inp label="Nome da prova *" value={nome} onChange={e=>setNome(e.target.value)} placeholder="Ex: Prova Bimestral de Matemática"/>
+          <Inp label="Disciplina" value={disc} onChange={e=>setDisc(e.target.value)} placeholder="Ex: Matemática"/>
+          <Inp label="Turma" value={turma} onChange={e=>setTurma(e.target.value)} placeholder="Ex: 3ºA"/>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <Inp label="Nº de questões" type="number" min={1} max={60} value={nq} onChange={e=>changeNq(e.target.value)}/>
+            <Inp label="Nota máxima" type="number" min={1} max={100} value={peso} onChange={e=>setPeso(e.target.value)}/>
+          </div>
+          <div style={{marginBottom:14}}>
+            <label style={{color:C.muted,fontSize:13,display:"block",marginBottom:8}}>Gabarito oficial *</label>
+            <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+              {gab.map((g,i)=>(
+                <div key={i} style={{textAlign:"center"}}>
+                  <div style={{fontSize:11,color:C.subtle,marginBottom:2}}>{i+1}</div>
+                  <select value={g} onChange={e=>setGab(p=>{const n=[...p];n[i]=e.target.value;return n;})} style={{background:C.bg,border:`1px solid ${g?C.accent:C.border}`,color:g?C.text:C.muted,borderRadius:6,padding:"4px 2px",fontSize:13,width:38}}>
+                    <option value="">-</option>{alts.map(a=><option key={a} value={a}>{a}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+            <Btn outline onClick={onClose}>Cancelar</Btn>
+            <Btn onClick={save}>Salvar Prova</Btn>
+          </div>
+        </Modal>
+      );
+    }
+
+    // ── Scanner ────────────────────────────────────────────────────────────────
+    function Scanner({prova,onSave,onClose}) {
+      const videoRef=useRef(null); const canvasRef=useRef(null); const streamRef=useRef(null);
+      const [fase,setFase]=useState("cam"); const [imgData,setImgData]=useState(null);
+      const [loading,setLoading]=useState(false); const [err,setErr]=useState("");
+      const [nomeAluno,setNomeAluno]=useState(""); const [turmaAluno,setTurmaAluno]=useState(prova.turma||"");
+      const [respostas,setRespostas]=useState(prova.gabarito.map(()=>""));
+
+      useEffect(()=>{
+        if(fase!=="cam")return;
+        (async()=>{
+          try{
+            const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1920},height:{ideal:1080}}});
+            streamRef.current=s;
+            if(videoRef.current){videoRef.current.srcObject=s;videoRef.current.play();}
+          }catch(e){setErr("Câmera bloqueada. No celular, acesse via HTTPS. Você também pode usar a Galeria.");}
+        })();
+        return()=>streamRef.current?.getTracks().forEach(t=>t.stop());
+      },[fase]);
+
+      const capturar=()=>{const v=videoRef.current,c=canvasRef.current;c.width=v.videoWidth;c.height=v.videoHeight;c.getContext("2d").drawImage(v,0,0);setImgData(c.toDataURL("image/jpeg",0.9));streamRef.current?.getTracks().forEach(t=>t.stop());setFase("preview");};
+
+      const analisar=async()=>{
+        setLoading(true);setErr("");
+        try{
+          const base64=imgData.split(",")[1];
+          const prompt=`Analise esta folha de gabarito escolar e extraia:\n1. Nome do aluno (campo Nome)\n2. Turma\n3. As ${prova.gabarito.length} respostas marcadas (A,B,C,D ou E)\n\nResponda SOMENTE com JSON válido, sem markdown:\n{"nome":"","turma":"","respostas":["A","B",...]}`;
+          const resp=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:"image/jpeg",data:base64}},{type:"text",text:prompt}]}]})});
+          const data=await resp.json();
+          const raw=data.content?.find(b=>b.type==="text")?.text||"";
+          const parsed=JSON.parse(raw.replace(/```json|```/g,"").trim());
+          const rs=Array.from({length:prova.gabarito.length},(_,i)=>(parsed.respostas?.[i]||"").toUpperCase());
+          setRespostas(rs);setNomeAluno(parsed.nome||"");if(parsed.turma)setTurmaAluno(parsed.turma);
+          setFase("revisao");
+        }catch{setErr("Erro ao analisar. Verifique a iluminação e tente novamente.");}
+        finally{setLoading(false);}
+      };
+
+      const salvar=()=>{
+        if(!nomeAluno.trim())return alert("Informe o nome do aluno.");
+        const acertos=respostas.filter((r,i)=>r===prova.gabarito[i]).length;
+        onSave({id:uid(),provaId:prova.id,nomeAluno,turma:turmaAluno,respostas,acertos,erros:prova.gabarito.length-acertos,nota:calcNota(acertos,prova.gabarito.length,prova.peso),totalQuestoes:prova.gabarito.length,dataProva:new Date().toISOString()});
+      };
+
+      return (
+        <Modal title={`Escanear: ${prova.nome}`} onClose={onClose}>
+          {err&&<div style={{background:"#ef444422",border:`1px solid ${C.error}`,borderRadius:8,padding:12,color:C.error,marginBottom:12,fontSize:13}}>{err}</div>}
+          {fase==="cam"&&(
+            <div>
+              <p style={{color:C.muted,fontSize:13,marginBottom:10}}>Posicione a folha de gabarito preenchida e capture.</p>
+              <div style={{borderRadius:10,overflow:"hidden",background:"#000",marginBottom:12,minHeight:180,position:"relative"}}>
+                <video ref={videoRef} autoPlay playsInline muted style={{width:"100%",display:"block",maxHeight:300,objectFit:"cover"}}/>
+                <canvas ref={canvasRef} style={{display:"none"}}/>
+              </div>
+              <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+                <Btn onClick={capturar} disabled={!!err}>📷 Capturar</Btn>
+                <label style={{display:"flex",alignItems:"center"}}>
+                  <input type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{setImgData(ev.target.result);streamRef.current?.getTracks().forEach(t=>t.stop());setFase("preview");};r.readAsDataURL(f);}}/>
+                  <span style={{background:C.card,border:`1.5px solid ${C.border}`,color:C.text,padding:"10px 16px",borderRadius:8,cursor:"pointer",fontSize:14,fontWeight:600}}>📸 Câmera/Galeria</span>
+                </label>
+              </div>
+            </div>
+          )}
+          {fase==="preview"&&(
+            <div>
+              <img src={imgData} alt="gabarito" style={{width:"100%",borderRadius:8,marginBottom:14}}/>
+              <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+                <Btn outline onClick={()=>{setImgData(null);setFase("cam");}}>↩ Repetir</Btn>
+                <Btn onClick={analisar} disabled={loading}>{loading?"⏳ Analisando...":"🤖 Analisar com IA"}</Btn>
+              </div>
+            </div>
+          )}
+          {fase==="revisao"&&(
+            <div>
+              <Inp label="Nome do aluno *" value={nomeAluno} onChange={e=>setNomeAluno(e.target.value)}/>
+              <Inp label="Turma" value={turmaAluno} onChange={e=>setTurmaAluno(e.target.value)}/>
+              <div style={{marginBottom:14}}>
+                <label style={{color:C.muted,fontSize:13,display:"block",marginBottom:8}}>Respostas — corrija se necessário</label>
+                <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                  {respostas.map((r,i)=>{const certa=r===prova.gabarito[i];const cor=r===""?C.warn:certa?C.success:C.error;return(
+                    <div key={i} style={{textAlign:"center"}}>
+                      <div style={{fontSize:11,color:C.subtle,marginBottom:2}}>{i+1}</div>
+                      <select value={r} onChange={e=>setRespostas(p=>{const n=[...p];n[i]=e.target.value;return n;})} style={{background:cor+"22",border:`1.5px solid ${cor}`,color:C.text,borderRadius:6,padding:"4px 2px",fontSize:13,width:38}}>
+                        <option value="">?</option>{alts.map(a=><option key={a} value={a}>{a}</option>)}
+                      </select>
+                      <div style={{fontSize:10,color:C.muted,marginTop:2}}>{prova.gabarito[i]}</div>
+                    </div>
+                  );})}
+                </div>
+              </div>
+              {(()=>{const ac=respostas.filter((r,i)=>r===prova.gabarito[i]).length;return(<div style={{background:`${C.accent}11`,border:`1px solid ${C.accent}44`,borderRadius:8,padding:12,marginBottom:14,fontSize:14}}>✅ <b>{ac}</b> acertos · ❌ <b>{prova.gabarito.length-ac}</b> erros · Nota: <b style={{color:C.accentLight}}>{calcNota(ac,prova.gabarito.length,prova.peso)}</b></div>);})()}
+              <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+                <Btn outline onClick={()=>setFase("preview")}>↩ Reanalisar</Btn>
+                <Btn color={C.success} onClick={salvar}>💾 Salvar</Btn>
+              </div>
+            </div>
+          )}
+        </Modal>
+      );
+    }
+
+    // ── Relatório ──────────────────────────────────────────────────────────────
+    function Relatorio({prova,resultados,onClose,onDel}) {
+      const rs=resultados.filter(r=>r.provaId===prova.id);
+      if(rs.length===0)return(<Modal title="Relatório" onClose={onClose}><p style={{color:C.muted,textAlign:"center",padding:32}}>Nenhum resultado ainda.</p></Modal>);
+      const notas=rs.map(r=>parseFloat(r.nota));
+      const media=(notas.reduce((a,b)=>a+b,0)/notas.length).toFixed(2);
+      const maior=Math.max(...notas).toFixed(2); const menor=Math.min(...notas).toFixed(2);
+      const acertoPorQ=prova.gabarito.map((_,i)=>Math.round((rs.filter(r=>r.respostas[i]===prova.gabarito[i]).length/rs.length)*100));
+      const exportCSV=()=>{const rows=[["Aluno","Turma","Acertos","Erros","Nota",...prova.gabarito.map((_,i)=>`Q${i+1}`)], ...rs.map(r=>[r.nomeAluno,r.turma,r.acertos,r.erros,r.nota,...r.respostas])]; const csv=rows.map(r=>r.join(";")).join("\n"); const a=document.createElement("a");a.href="data:text/csv;charset=utf-8,\uFEFF"+encodeURIComponent(csv);a.download=`${prova.nome}.csv`;a.click();};
+      return(
+        <Modal title={`Relatório: ${prova.nome}`} onClose={onClose} wide>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:14}}>
+            {[["Alunos",rs.length,C.accent],["Média",media,C.accentLight],["Maior",maior,C.success],["Menor",menor,C.error]].map(([l,v,c])=>(
+              <div key={l} style={{background:C.bg,borderRadius:8,padding:10,textAlign:"center",border:`1px solid ${C.border}`}}>
+                <div style={{fontSize:17,fontWeight:800,color:c}}>{v}</div>
+                <div style={{fontSize:11,color:C.muted}}>{l}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:12,color:C.muted,marginBottom:6}}>% de acerto por questão</div>
+            <div style={{display:"flex",gap:2,alignItems:"flex-end",height:50,background:C.bg,borderRadius:8,padding:"6px 6px 0"}}>
+              {acertoPorQ.map((p,i)=>(
+                <div key={i} title={`Q${i+1}: ${p}%`} style={{flex:1,background:p>=70?C.success:p>=40?C.warn:C.error,height:`${Math.max(p,4)}%`,borderRadius:"2px 2px 0 0",minWidth:4}}/>
+              ))}
+            </div>
+          </div>
+          <div style={{marginBottom:14}}>
+            {[...rs].sort((a,b)=>parseFloat(b.nota)-parseFloat(a.nota)).map((r,i)=>(
+              <div key={r.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:`1px solid ${C.border}`}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <span style={{width:22,height:22,background:i===0?C.warn:C.border,borderRadius:"50%",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700}}>{i+1}</span>
+                  <div><div style={{fontSize:14,fontWeight:600}}>{r.nomeAluno}</div><div style={{fontSize:11,color:C.muted}}>{r.turma} · {r.acertos}/{r.totalQuestoes}</div></div>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{fontWeight:700,color:parseFloat(r.nota)>=7?C.success:parseFloat(r.nota)>=5?C.warn:C.error}}>{r.nota}</span>
+                  <button onClick={()=>{if(confirm("Remover?"))onDel(r.id);}} style={{background:"none",border:"none",color:C.error,cursor:"pointer",fontSize:16}}>🗑</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <Btn full onClick={exportCSV}>⬇️ Exportar CSV</Btn>
+        </Modal>
+      );
+    }
+
+    // ── App ────────────────────────────────────────────────────────────────────
+    function App() {
+      const {provas,resultados,turmas,saveProva,delProva,saveResultado,delResultado,saveTurmas}=useStore();
+      const [modal,setModal]=useState(null);
+      const totalAlunos=new Set(resultados.map(r=>r.nomeAluno)).size;
+      const mediaGeral=resultados.length?(resultados.reduce((a,r)=>a+parseFloat(r.nota),0)/resultados.length).toFixed(2):"—";
+      const turmasU=[...new Set(turmas.map(a=>a.turma).filter(Boolean))];
+      return(
+        <div style={{minHeight:"100vh",background:C.bg,color:C.text,paddingBottom:40}}>
+          <div style={{background:C.card,borderBottom:`1px solid ${C.border}`,padding:"14px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:10}}>
+            <div><div style={{fontWeight:800,fontSize:19,color:C.accentLight}}>📋 GabaritoScan</div><div style={{fontSize:11,color:C.muted}}>Leitura automática com IA</div></div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn sm outline onClick={()=>setModal({tipo:"turmas"})}>👥 {turmas.length>0?turmas.length+" alunos":"Alunos"}</Btn>
+              <Btn sm onClick={()=>setModal({tipo:"cadastro",dados:null})}>+ Prova</Btn>
+            </div>
+          </div>
+          <div style={{maxWidth:540,margin:"0 auto",padding:"18px 14px"}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:18}}>
+              {[["Provas",provas.length,"📝"],["Avaliados",totalAlunos,"🎓"],["Média",mediaGeral,"📊"]].map(([l,v,e])=>(
+                <Card key={l} style={{textAlign:"center",padding:14}}>
+                  <div style={{fontSize:22}}>{e}</div>
+                  <div style={{fontSize:20,fontWeight:800,color:C.accentLight}}>{v}</div>
+                  <div style={{fontSize:11,color:C.muted}}>{l}</div>
+                </Card>
+              ))}
+            </div>
+            {turmas.length===0&&(
+              <Card style={{marginBottom:18,padding:14,border:`1px dashed ${C.accent}`,background:`${C.accent}08`}}>
+                <div style={{display:"flex",alignItems:"center",gap:12}}>
+                  <span style={{fontSize:26}}>👥</span>
+                  <div style={{flex:1}}><div style={{fontWeight:700,marginBottom:2}}>Importe sua lista de alunos</div><div style={{fontSize:12,color:C.muted}}>Gere folhas de gabarito personalizadas para impressão.</div></div>
+                  <Btn sm onClick={()=>setModal({tipo:"turmas"})}>Importar</Btn>
+                </div>
+              </Card>
+            )}
+            {turmas.length>0&&(
+              <Card style={{marginBottom:18,padding:14}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <span style={{fontWeight:700,fontSize:14}}>👥 Alunos Cadastrados</span>
+                  <Btn sm outline onClick={()=>setModal({tipo:"turmas"})}>Gerenciar</Btn>
+                </div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {turmasU.map(t=><Badge key={t} color={C.accent}>{t} · {turmas.filter(a=>a.turma===t).length} alunos</Badge>)}
+                  {turmasU.length===0&&<span style={{fontSize:13,color:C.muted}}>{turmas.length} aluno(s)</span>}
+                </div>
+              </Card>
+            )}
+            <div style={{fontWeight:700,fontSize:15,marginBottom:10}}>Provas Cadastradas</div>
+            {provas.length===0&&(
+              <Card style={{textAlign:"center",padding:36}}>
+                <div style={{fontSize:36,marginBottom:8}}>📋</div>
+                <div style={{color:C.muted}}>Nenhuma prova. Clique em <b style={{color:C.accentLight}}>+ Prova</b> para começar.</div>
+              </Card>
+            )}
+            {provas.map(p=>{
+              const nRes=resultados.filter(r=>r.provaId===p.id).length;
+              return(
+                <Card key={p.id} style={{marginBottom:12}}>
+                  <div style={{fontWeight:700,fontSize:15,marginBottom:6}}>{p.nome}</div>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
+                    {p.disciplina&&<Badge color={C.accent}>{p.disciplina}</Badge>}
+                    {p.turma&&<Badge color={C.accentLight}>{p.turma}</Badge>}
+                    <Badge color={C.muted}>{p.gabarito.length} questões</Badge>
+                    <Badge color={nRes>0?C.success:C.subtle}>{nRes} resultado{nRes!==1?"s":""}</Badge>
+                  </div>
+                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                    <Btn sm onClick={()=>setModal({tipo:"scan",dados:p})}>📷 Escanear</Btn>
+                    {turmas.length>0&&<Btn sm outline onClick={()=>setModal({tipo:"folhas",dados:p})}>🖨️ Folhas</Btn>}
+                    {nRes>0&&<Btn sm outline onClick={()=>setModal({tipo:"relatorio",dados:p})}>📊 Relatório</Btn>}
+                    <Btn sm outline onClick={()=>setModal({tipo:"cadastro",dados:p})}>✏️</Btn>
+                    <Btn sm color={C.error} onClick={()=>{if(confirm(`Remover "${p.nome}"?`))delProva(p.id);}}>🗑</Btn>
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+          {modal?.tipo==="turmas"&&<ImportarTurmas atual={turmas} onSave={a=>{saveTurmas(a);setModal(null);}} onClose={()=>setModal(null)}/>}
+          {modal?.tipo==="cadastro"&&<CadastroProva prova={modal.dados} onSave={p=>{saveProva(p);setModal(null);}} onClose={()=>setModal(null)}/>}
+          {modal?.tipo==="scan"&&<Scanner prova={modal.dados} onSave={r=>{saveResultado(r);setModal(null);alert(`✅ ${r.nomeAluno}\nNota: ${r.nota}`);}} onClose={()=>setModal(null)}/>}
+          {modal?.tipo==="folhas"&&<GerarFolhas prova={modal.dados} alunos={turmas} onClose={()=>setModal(null)}/>}
+          {modal?.tipo==="relatorio"&&<Relatorio prova={modal.dados} resultados={resultados} onDel={delResultado} onClose={()=>setModal(null)}/>}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+  </script>
+</body>
+</html>
